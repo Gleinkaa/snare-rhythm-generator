@@ -1,8 +1,17 @@
 @echo off
 setlocal
 
+:: Self-elevate to admin if not already
+net session >nul 2>&1
+if errorlevel 1 (
+    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
+
+:: Strip trailing backslash from %~dp0 to avoid quote escape issues
 set "REPO_DIR=%~dp0"
-set "BUILD_DIR=%REPO_DIR%build"
+if "%REPO_DIR:~-1%"=="\" set "REPO_DIR=%REPO_DIR:~0,-1%"
+set "BUILD_DIR=%REPO_DIR%\build"
 set "VST3_DEST=C:\Program Files\Common Files\VST3"
 
 echo === Snare Rhythm Generator - Build and Install ===
@@ -31,7 +40,7 @@ echo.
 echo Copying to "%VST3_DEST%"...
 xcopy /e /i /y "%VST3_SRC%" "%VST3_DEST%\SnareRhythmGenerator.vst3\"
 if errorlevel 1 (
-    echo ERROR: Copy failed. Try running as Administrator.
+    echo ERROR: Copy failed.
     pause & exit /b 1
 )
 

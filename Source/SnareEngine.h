@@ -132,8 +132,8 @@ public:
         }
         all = addFills(std::move(all));
         all = addFlams(std::move(all));
-        all = humanize(std::move(all));
         all = doSwing(std::move(all));
+        all = humanize(std::move(all));
         all = probGate(std::move(all));
 
         Result r;
@@ -157,7 +157,6 @@ private:
         cf(par.complexity); cf(par.density); cf(par.syncopation); cf(par.swing);
         cf(par.humanize); cf(par.accentStr); cf(par.ghostNotes); cf(par.fillFreq);
         cf(par.variation); cf(par.motifStr); cf(par.looseness); cf(par.probability); cf(par.flam);
-        cf(par.accentStr);
         par.velMin = std::clamp(par.velMin, 1, 127);
         par.velMax = std::clamp(par.velMax, par.velMin, 127);
         par.bars = std::clamp(par.bars, 1, 16);
@@ -249,7 +248,7 @@ private:
             if (bi > 0 && !bb && rr() > par.motifStr) {
                 float a = rr();
                 if (a < 0.35f * bv) continue;
-                else if (a < 0.6f * bv) s = std::clamp(s + (rr() < 0.5f ? -1 : 1), 0, spbr - 1);
+                else if (a < 0.6f * bv) { s = std::clamp(s + (rr() < 0.5f ? -1 : 1), 0, spbr - 1); if (used.count(s)) continue; }
                 else if (a < 0.8f * bv && type == Ghost) { if (rr() < 0.3f) { type = Primary; v = 0.65f; } else continue; }
             }
             float prob = 1.f;
@@ -323,8 +322,12 @@ private:
         if (par.flam <= 0) return hits;
         std::vector<SnareHit> extra;
         for (auto& h : hits)
-            if ((h.hitType == Primary || h.hitType == Accent) && rr() < par.flam * 0.5f)
-                extra.push_back({h.tick - 0.15f, std::max(par.velMin, h.velocity - 30), 0.1f, Flam, h.probability, h.bar});
+            if ((h.hitType == Primary || h.hitType == Accent) && rr() < par.flam * 0.5f) {
+                float flamTick = h.tick - 0.15f;
+                int flamBar = h.bar;
+                if (flamTick < 0.f) { flamTick += (float)spbr; flamBar = std::max(0, h.bar - 1); }
+                extra.push_back({flamTick, std::max(par.velMin, h.velocity - 30), 0.1f, Flam, h.probability, flamBar});
+            }
         hits.insert(hits.end(), extra.begin(), extra.end());
         return hits;
     }
@@ -356,7 +359,8 @@ private:
         if (par.probability >= 1.f) return hits;
         std::vector<SnareHit> out;
         for (auto& h : hits) {
-            if ((h.hitType == Primary || h.hitType == Accent) && isSB((int)h.tick / spb) && (int)h.tick % spb == 0)
+            int roundedTick = (int)std::round(h.tick);
+            if ((h.hitType == Primary || h.hitType == Accent) && isSB(roundedTick / spb) && roundedTick % spb == 0)
             { out.push_back(h); continue; }
             if (rr() < h.probability * par.probability) out.push_back(h);
         }

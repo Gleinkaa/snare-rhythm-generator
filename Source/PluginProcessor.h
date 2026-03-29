@@ -10,7 +10,7 @@ public:
     ~SnareProcessor() override = default;
 
     void prepareToPlay(double sr, int) override { sampleRate = sr; }
-    void releaseResources() override { playing.store(false); playPos.store(0.f); }
+    void releaseResources() override { playing.store(false); playPos.store(0.f); pendingOffs.clear(); }
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -67,11 +67,10 @@ private:
 
     // Pending note-offs tracked across buffers
     struct PendingNoteOff {
-        int sampleOffset;  // absolute sample from playback start (modulo pattern length)
+        int sampleOffset;  // samples remaining until note-off fires (counted down each buffer)
         int note;
     };
     std::vector<PendingNoteOff> pendingOffs;
-    int64_t absoluteSample = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SnareProcessor)
 };

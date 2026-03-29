@@ -103,7 +103,7 @@ void SnareProcessorEditor::generate() {
 }
 
 void SnareProcessorEditor::applyGenreDefaults(const snare::GenreProfile& gp) {
-    kBpm.set((float)((gp.bpmLo + gp.bpmHi) / 2));
+    kBpm.set((float)(gp.bpmLo + gp.bpmHi) / 2.f);
     kSwing.set(gp.defaultSwing);
     kGhost.set(gp.ghostAffinity * 0.5f);
     kSynco.set(gp.syncopationBias);

@@ -88,7 +88,7 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
 
         pos = nextPos;
-        if (pos >= totalQuarters) pos = 0.f;
+        if (pos >= totalQuarters) pos -= totalQuarters;
     }
 
     // Process pending note-offs from previous buffers

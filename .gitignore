@@ -1,0 +1,40 @@
+# Build artifacts
+build/
+out/
+*.vst3
+*.component
+*.app
+*.exe
+*.dll
+*.dylib
+*.o
+*.obj
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.vcxproj
+*.vcxproj.filters
+*.sln
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+*.pbxproj
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# JUCE fetched content (built via FetchContent — do not commit)
+_deps/

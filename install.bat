@@ -8,9 +8,8 @@ if errorlevel 1 (
     exit /b
 )
 
-:: Strip trailing backslash from %~dp0 to avoid quote escape issues
-set "REPO_DIR=%~dp0"
-if "%REPO_DIR:~-1%"=="\" set "REPO_DIR=%REPO_DIR:~0,-1%"
+:: Convert to short 8.3 path to avoid JUCE juceaide crash on non-ASCII chars (e.g. umlauts)
+for %%I in ("%~dp0.") do set "REPO_DIR=%%~sI"
 set "BUILD_DIR=%REPO_DIR%\build"
 set "VST3_DEST=C:\Program Files\Common Files\VST3"
 
@@ -29,16 +28,16 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-for /r "%BUILD_DIR%" %%f in (SnareRhythmGenerator.vst3) do set "VST3_SRC=%%f"
+set "VST3_SRC=%BUILD_DIR%\SnareRhythmGenerator_artefacts\Release\VST3\Snare Rhythm Generator.vst3"
 
-if not defined VST3_SRC (
-    echo ERROR: Could not find SnareRhythmGenerator.vst3 in build output.
+if not exist "%VST3_SRC%" (
+    echo ERROR: Could not find VST3 bundle at "%VST3_SRC%"
     pause & exit /b 1
 )
 
 echo.
 echo Copying to "%VST3_DEST%"...
-xcopy /e /i /y "%VST3_SRC%" "%VST3_DEST%\SnareRhythmGenerator.vst3\"
+xcopy /e /i /y "%VST3_SRC%" "%VST3_DEST%\Snare Rhythm Generator.vst3\"
 if errorlevel 1 (
     echo ERROR: Copy failed.
     pause & exit /b 1

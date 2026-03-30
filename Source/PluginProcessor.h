@@ -9,13 +9,13 @@ public:
     SnareProcessor();
     ~SnareProcessor() override = default;
 
-    void prepareToPlay(double sr, int) override { sampleRate = sr; }
-    void releaseResources() override { playing.store(false); playPos.store(0.f); pendingOffs.clear(); }
+    void prepareToPlay(double sr, int blockSize) override;
+    void releaseResources() override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const juce::String getName() const override { return "Snare Rhythm Generator"; }
+    const juce::String getName() const override { return "SnareRhythmGen"; }
     bool acceptsMidi()  const override { return true; }
     bool producesMidi() const override { return true; }
     bool isMidiEffect() const override { return false; }
@@ -36,10 +36,21 @@ public:
     bool isPlaying() const { return playing.load(); }
     float getPlaybackPos() const { return playPos.load(); }
 
+    // Sample player
+    void loadSample(const juce::File& file);
+    juce::String getSampleName() const { return sampleName; }
+    bool hasSample() const { return sampleBuffer.getNumSamples() > 0; }
+
+    // Preset save/load
+    void savePreset(const juce::File& file);
+    void loadPreset(const juce::File& file);
+
     // Params — only touched from message thread (editor)
     snare::Params params;
+    float gateLength  = 1.0f;   // 0.25 - 2.0
+    float sampleVol   = 0.8f;   // 0 - 1
 
-    // Display data — lock-free double buffer (written by regenerate on msg thread, read by editor paint)
+    // Display data
     struct DisplayData {
         std::vector<snare::SnareHit> hits;
         snare::Scores scores;
@@ -51,10 +62,8 @@ private:
     std::atomic<bool> playing { false };
     std::atomic<float> playPos { 0.f };
 
-    // Display data — atomic shared_ptr for lock-free thread safety
     std::shared_ptr<DisplayData> displayData = std::make_shared<DisplayData>();
 
-    // Audio thread data — lock-free swap via atomic shared_ptr
     struct AudioData {
         std::vector<snare::SnareHit> hits;
         int snareNote = 38;
@@ -62,15 +71,33 @@ private:
         int bars = 4;
         int timeSig = 4;
         int resolution = 4;
+        float gateLen = 1.0f;
     };
     std::shared_ptr<AudioData> audioData = std::make_shared<AudioData>();
 
-    // Pending note-offs tracked across buffers
     struct PendingNoteOff {
-        int sampleOffset;  // samples remaining until note-off fires (counted down each buffer)
+        int sampleOffset;
         int note;
     };
     std::vector<PendingNoteOff> pendingOffs;
+
+    // Sample player (8-voice polyphonic)
+    juce::AudioBuffer<float> sampleBuffer;
+    double sampleSampleRate = 44100.0;
+    juce::String sampleName;
+    juce::String samplePath;
+
+    struct SampleVoice {
+        int pos = 0;
+        float gain = 1.0f;
+        bool active = false;
+    };
+    std::array<SampleVoice, 8> sampleVoices;
+public:
+    std::atomic<float> atomicSampleVol { 0.8f };
+
+private:
+    juce::AudioFormatManager formatManager;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SnareProcessor)
 };

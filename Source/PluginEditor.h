@@ -2,21 +2,24 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
+// ── Blue Dark Theme ────────────────────────────────────────────────────────
 namespace Col {
-    inline juce::Colour bg()        { return juce::Colour(0xff0d0d0du); }
-    inline juce::Colour bg2()       { return juce::Colour(0xff1a1a1au); }
-    inline juce::Colour bg3()       { return juce::Colour(0xff252525u); }
-    inline juce::Colour border()    { return juce::Colour(0xff3a3a3au); }
-    inline juce::Colour accent()    { return juce::Colour(0xffff3366u); }
-    inline juce::Colour accentDim() { return juce::Colour(0x44ff3366u); }
-    inline juce::Colour blue()      { return juce::Colour(0xff4fc3f7u); }
-    inline juce::Colour green()     { return juce::Colour(0xff66bb6au); }
-    inline juce::Colour amber()     { return juce::Colour(0xffffa726u); }
-    inline juce::Colour purple()    { return juce::Colour(0xffab47bcu); }
-    inline juce::Colour teal()      { return juce::Colour(0xff26c6dau); }
-    inline juce::Colour textW()     { return juce::Colour(0xfff0f0f0u); }
-    inline juce::Colour textG()     { return juce::Colour(0xff909090u); }
-    inline juce::Colour textD()     { return juce::Colour(0xff707070u); }
+    inline juce::Colour bg()        { return juce::Colour(0xff0a0e14u); }  // deep dark blue-black
+    inline juce::Colour bg2()       { return juce::Colour(0xff111822u); }  // panel bg
+    inline juce::Colour bg3()       { return juce::Colour(0xff1a2332u); }  // element bg
+    inline juce::Colour border()    { return juce::Colour(0xff2a3545u); }
+    inline juce::Colour accent()    { return juce::Colour(0xff00b4d8u); }  // cyan accent
+    inline juce::Colour accentDim() { return juce::Colour(0x4400b4d8u); }
+    inline juce::Colour blue()      { return juce::Colour(0xff48cae4u); }  // light cyan
+    inline juce::Colour green()     { return juce::Colour(0xff52b788u); }
+    inline juce::Colour amber()     { return juce::Colour(0xffffb347u); }  // orange for accents
+    inline juce::Colour purple()    { return juce::Colour(0xff9d8df1u); }
+    inline juce::Colour teal()      { return juce::Colour(0xff2ec4b6u); }
+    inline juce::Colour textW()     { return juce::Colour(0xffe8edf3u); }
+    inline juce::Colour textG()     { return juce::Colour(0xff7a8a9eu); }
+    inline juce::Colour textD()     { return juce::Colour(0xff4a5568u); }
+    inline juce::Colour sampleOk()  { return juce::Colour(0xff52b788u); }  // green border when loaded
+    inline juce::Colour sampleEmpty(){ return juce::Colour(0xff4a5568u); } // gray dashed border
 }
 
 // ── Knob ────────────────────────────────────────────────────────────────────
@@ -65,7 +68,9 @@ public:
 
         g.setColour(Col::textW());
         g.setFont(10.f);
-        juce::String vt = mx <= 1.01f ? juce::String(val, 2) : juce::String((int)val);
+        juce::String vt = mx <= 2.01f && mn < 1.f ? juce::String(val, 2)
+                        : mx <= 127.f && step >= 0.9f ? juce::String((int)val)
+                        : juce::String(val, 2);
         g.drawText(vt, (int)(cx - 20), (int)(cy - 5), 40, 12, juce::Justification::centred);
 
         g.setColour(Col::textG());
@@ -101,7 +106,9 @@ private:
 };
 
 // ── Editor ──────────────────────────────────────────────────────────────────
-class SnareProcessorEditor : public juce::AudioProcessorEditor, public juce::Timer {
+class SnareProcessorEditor : public juce::AudioProcessorEditor,
+                              public juce::Timer,
+                              public juce::FileDragAndDropTarget {
 public:
     SnareProcessorEditor(SnareProcessor&);
     ~SnareProcessorEditor() override { stopTimer(); }
@@ -111,37 +118,57 @@ public:
     void mouseDown(const juce::MouseEvent&) override;
     void mouseMove(const juce::MouseEvent&) override;
 
+    // Drag and drop for sample loading
+    bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void filesDropped(const juce::StringArray& files, int x, int y) override;
+    void fileDragEnter(const juce::StringArray&, int, int) override { dragOver = true; repaint(); }
+    void fileDragExit(const juce::StringArray&) override { dragOver = false; repaint(); }
+
 private:
     SnareProcessor& proc;
     int selGenre = 5;
     int hoverGenre = -1;
+    bool dragOver = false;
 
     juce::TooltipWindow tooltipWindow { this };
 
-    Knob kBpm      {"BPM",     "Tempo in beats per minute",                90,   40, 300, 1,    Col::accent()};
-    Knob kBars     {"BARS",    "Number of bars to generate",                4,    1,  16, 1,    Col::accent()};
-    Knob kComplex  {"CMPLX",   "Pattern complexity - more = busier fills", 0.4f,  0,  1, 0.01f, Col::blue()};
-    Knob kDensity  {"DENS",    "Hit density - how many notes per bar",     0.4f,  0,  1, 0.01f, Col::blue()};
-    Knob kSynco    {"SYNCO",   "Syncopation - off-beat hit placement",     0.3f,  0,  1, 0.01f, Col::teal()};
-    Knob kSwing    {"SWING",   "Swing feel - delays off-beat notes",       0.0f,  0,  1, 0.01f, Col::teal()};
-    Knob kHuman    {"HUMAN",   "Humanize - velocity & timing variation",   0.3f,  0,  1, 0.01f, Col::amber()};
-    Knob kAccent   {"ACCENT",  "Accent strength on strong beats",          0.6f,  0,  1, 0.01f, Col::accent()};
-    Knob kGhost    {"GHOST",   "Ghost note amount - soft in-between hits", 0.3f,  0,  1, 0.01f, Col::purple()};
-    Knob kFills    {"FILL",    "Fill frequency - drum fills at bar ends",  0.2f,  0,  1, 0.01f, Col::amber()};
-    Knob kVar      {"VAR",     "Variation between bars",                   0.2f,  0,  1, 0.01f, Col::green()};
-    Knob kMotif    {"MOTIF",   "Motif strength - pattern consistency",     0.7f,  0,  1, 0.01f, Col::green()};
-    Knob kLoose    {"LOOSE",   "Looseness - timing imprecision",           0.2f,  0,  1, 0.01f, Col::amber()};
-    Knob kProb     {"PROB",    "Probability - chance each hit plays",      1.0f,  0,  1, 0.01f, Col::blue()};
-    Knob kFlam     {"FLAM",    "Flam - double-stroke before hits",        0.0f,  0,  1, 0.01f, Col::purple()};
-    Knob kVMin     {"V.LO",    "Minimum velocity (softest hit)",            30,    1, 126, 1,    Col::textG()};
-    Knob kVMax     {"V.HI",    "Maximum velocity (hardest hit)",           127,    2, 127, 1,    Col::textW()};
+    // Row 1: Rhythm
+    Knob kComplex  {"CMPLX",   "Pattern complexity",                       0.3f,  0,  1, 0.01f, Col::accent()};
+    Knob kDensity  {"DENSE",   "Hit density",                              0.4f,  0,  1, 0.01f, Col::accent()};
+    Knob kSynco    {"SYNC",    "Syncopation",                              0.2f,  0,  1, 0.01f, Col::blue()};
+    Knob kSwing    {"SWING",   "Swing feel",                               0.0f,  0,  1, 0.01f, Col::blue()};
+
+    // Row 1: Feel
+    Knob kHuman    {"HUMAN",   "Humanize velocity variation",              0.15f, 0,  1, 0.01f, Col::teal()};
+    Knob kAccent   {"ACCNT",   "Accent strength on beats 2 and 4",        0.7f,  0,  1, 0.01f, Col::amber()};
+    Knob kGhost    {"GHOST",   "Ghost note amount",                        0.3f,  0,  1, 0.01f, Col::purple()};
+    Knob kLoose    {"LOOSE",   "Timing looseness",                         0.1f,  0,  1, 0.01f, Col::teal()};
+
+    // Row 2: Structure
+    Knob kVar      {"VARI",    "Bar-to-bar variation",                     0.2f,  0,  1, 0.01f, Col::green()};
+    Knob kMotif    {"MOTIF",   "Motif strength",                           0.7f,  0,  1, 0.01f, Col::green()};
+    Knob kFills    {"FILL",    "Fill frequency at phrase boundaries",      0.15f, 0,  1, 0.01f, Col::amber()};
+    Knob kFlam     {"FLAM",    "Flam double-stroke",                       0.0f,  0,  1, 0.01f, Col::purple()};
+
+    // Row 2: Output
+    Knob kVMin     {"V.MIN",   "Minimum velocity",                          79,    1, 126, 1,    Col::textG()};
+    Knob kVMax     {"V.MAX",   "Maximum velocity",                         127,    2, 127, 1,    Col::textW()};
+    Knob kGate     {"GATE",    "Note duration multiplier (0.25x-2.0x)",    1.0f, 0.25f, 2.0f, 0.01f, Col::accent()};
+    Knob kSVol     {"S.VOL",   "Sample player volume",                     0.8f,  0,  1, 0.01f, Col::green()};
+
+    // Right column
+    Knob kBars     {"BARS",    "Phrase length in bars",                      8,    1,  16, 1,    Col::accent()};
+    Knob kNote     {"NOTE",    "MIDI note number (38=snare)",               38,    0, 127, 1,    Col::blue()};
+    Knob kSeed     {"SEED",    "Random seed (0-9999)",                      42,    0, 9999, 1,   Col::amber()};
 
     std::vector<Knob*> knobs;
 
     juce::TextButton btnGen  {"GENERATE"};
     juce::TextButton btnPlay {"PLAY"};
     juce::TextButton btnExp  {"EXPORT MIDI"};
-    juce::TextButton btnDice {"NEW SEED"};
+    juce::TextButton btnSave {"SAVE"};
+    juce::TextButton btnLoad {"LOAD"};
+    juce::TextButton btnLoadSample {"LOAD SAMPLE"};
     juce::ToggleButton btnBB {"Backbeat Lock"};
 
     void sync();
@@ -149,9 +176,14 @@ private:
     void applyGenreDefaults(const snare::GenreProfile& gp);
     void paintHeader(juce::Graphics&);
     void paintGenres(juce::Graphics&, juce::Rectangle<int>);
+    void paintSampleZone(juce::Graphics&, juce::Rectangle<int>);
     void paintGrid(juce::Graphics&, juce::Rectangle<int>);
     void paintScores(juce::Graphics&, juce::Rectangle<int>);
     void paintLegend(juce::Graphics&, juce::Rectangle<int>);
+    void paintFooter(juce::Graphics&, juce::Rectangle<int>);
+    void syncFromProcessor();
+
+    juce::Rectangle<int> sampleZoneBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SnareProcessorEditor)
 };

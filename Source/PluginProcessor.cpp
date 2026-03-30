@@ -5,20 +5,30 @@ SnareProcessor::SnareProcessor()
     : AudioProcessor(BusesProperties()
           .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
+    formatManager.registerBasicFormats();
     regenerate();
+}
+
+void SnareProcessor::prepareToPlay(double sr, int) {
+    sampleRate = sr;
+}
+
+void SnareProcessor::releaseResources() {
+    playing.store(false);
+    playPos.store(0.f);
+    pendingOffs.clear();
+    for (auto& v : sampleVoices) v.active = false;
 }
 
 void SnareProcessor::regenerate() {
     snare::Generator gen;
     auto result = gen.run(params);
 
-    // Build new display data (lock-free publish)
     auto dd = std::make_shared<DisplayData>();
     dd->hits = result.hits;
     dd->scores = result.scores;
     std::atomic_store(&displayData, dd);
 
-    // Build new audio data (lock-free publish)
     auto ad = std::make_shared<AudioData>();
     ad->hits = std::move(result.hits);
     ad->snareNote = params.snareNote;
@@ -26,7 +36,42 @@ void SnareProcessor::regenerate() {
     ad->bars = params.bars;
     ad->timeSig = params.timeSigNum;
     ad->resolution = params.resolution;
+    ad->gateLen = gateLength;
     std::atomic_store(&audioData, ad);
+}
+
+void SnareProcessor::loadSample(const juce::File& file) {
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+    if (!reader) return;
+
+    juce::AudioBuffer<float> buf((int)reader->numChannels, (int)reader->lengthInSamples);
+    reader->read(&buf, 0, (int)reader->lengthInSamples, 0, true, true);
+
+    // Resample if needed
+    if (std::abs(reader->sampleRate - sampleRate) > 1.0) {
+        double ratio = sampleRate / reader->sampleRate;
+        int newLen = (int)(buf.getNumSamples() * ratio);
+        juce::AudioBuffer<float> resampled(buf.getNumChannels(), newLen);
+        for (int ch = 0; ch < buf.getNumChannels(); ++ch) {
+            auto* src = buf.getReadPointer(ch);
+            auto* dst = resampled.getWritePointer(ch);
+            for (int i = 0; i < newLen; ++i) {
+                double srcIdx = i / ratio;
+                int idx0 = (int)srcIdx;
+                float frac = (float)(srcIdx - idx0);
+                int idx1 = std::min(idx0 + 1, buf.getNumSamples() - 1);
+                dst[i] = src[idx0] * (1.f - frac) + src[idx1] * frac;
+            }
+        }
+        sampleBuffer = std::move(resampled);
+    } else {
+        sampleBuffer = std::move(buf);
+    }
+
+    sampleSampleRate = sampleRate;
+    sampleName = file.getFileNameWithoutExtension();
+    samplePath = file.getFullPathName();
+    for (auto& v : sampleVoices) v.active = false;
 }
 
 void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) {
@@ -36,17 +81,14 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     if (!playing.load())
         return;
 
-    // Bypass check
     if (auto* bypassParam = getBypassParameter())
         if (bypassParam->getValue() >= 0.5f)
             return;
 
-    // Lock-free read of audio data
     auto ad = std::atomic_load(&audioData);
     if (!ad || ad->hits.empty())
         return;
 
-    // Sync BPM from host if available
     int bpm = ad->bpm;
     if (auto* ph = getPlayHead()) {
         if (auto pos = ph->getPosition()) {
@@ -59,14 +101,12 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     double quartersPerSample = 1.0 / samplesPerQuarter;
     float ticksPerStep = 1.f / (float)ad->resolution;
     float totalQuarters = (float)(ad->bars * ad->timeSig);
+    float svol = atomicSampleVol.load();
 
     float pos = playPos.load();
     int numSamples = buffer.getNumSamples();
     int note = ad->snareNote;
 
-    // Single-pass: advance a hit index instead of scanning all hits per sample
-    // Sort hits by time for efficient iteration
-    // (hits are typically few enough that the inner loop is fine, but use early-exit)
     for (int i = 0; i < numSamples; ++i) {
         float nextPos = pos + (float)quartersPerSample;
 
@@ -75,14 +115,23 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             if (hitTime >= pos && hitTime < nextPos) {
                 auto vel = (juce::uint8)std::clamp(h.velocity, 1, 127);
                 midi.addEvent(juce::MidiMessage::noteOn(10, note, vel), i);
-                // Schedule note-off properly — compute offset in samples
-                int durSamples = std::max(1, (int)(h.duration * samplesPerQuarter));
+
+                int durSamples = std::max(1, (int)(h.duration * ad->gateLen * samplesPerQuarter));
                 int offSample = i + durSamples;
-                if (offSample < numSamples) {
+                if (offSample < numSamples)
                     midi.addEvent(juce::MidiMessage::noteOff(10, note), offSample);
-                } else {
-                    // Track for next buffer
+                else
                     pendingOffs.push_back({offSample - numSamples, note});
+
+                // Trigger sample voice
+                if (sampleBuffer.getNumSamples() > 0 && svol > 0.001f) {
+                    float gain = (float)vel / 127.f * svol;
+                    int oldest = 0;
+                    for (int v = 0; v < 8; ++v) {
+                        if (!sampleVoices[v].active) { oldest = v; break; }
+                        if (sampleVoices[v].pos > sampleVoices[oldest].pos) oldest = v;
+                    }
+                    sampleVoices[oldest] = { 0, gain, true };
                 }
             }
         }
@@ -91,7 +140,7 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         if (pos >= totalQuarters) pos -= totalQuarters;
     }
 
-    // Process pending note-offs from previous buffers
+    // Process pending note-offs
     for (auto it = pendingOffs.begin(); it != pendingOffs.end(); ) {
         if (it->sampleOffset < numSamples) {
             midi.addEvent(juce::MidiMessage::noteOff(10, it->note),
@@ -100,6 +149,29 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         } else {
             it->sampleOffset -= numSamples;
             ++it;
+        }
+    }
+
+    // Render sample voices into audio buffer
+    if (sampleBuffer.getNumSamples() > 0) {
+        int smpLen = sampleBuffer.getNumSamples();
+        int smpCh = sampleBuffer.getNumChannels();
+        int outCh = buffer.getNumChannels();
+
+        for (int i = 0; i < numSamples; ++i) {
+            float mix = 0.f;
+            for (auto& v : sampleVoices) {
+                if (!v.active) continue;
+                if (v.pos >= smpLen) { v.active = false; continue; }
+                float s = 0.f;
+                for (int c = 0; c < smpCh; ++c)
+                    s += sampleBuffer.getSample(c, v.pos);
+                s /= (float)smpCh;
+                mix += s * v.gain;
+                v.pos++;
+            }
+            for (int c = 0; c < outCh; ++c)
+                buffer.addSample(c, i, mix);
         }
     }
 
@@ -119,7 +191,8 @@ void SnareProcessor::exportMidi(const juce::File& file) {
         double timeSec = hitTime * 60.0 / bpm;
         auto vel = (juce::uint8)std::clamp(h.velocity, 1, 127);
         seq.addEvent(juce::MidiMessage::noteOn(10, params.snareNote, vel), timeSec);
-        seq.addEvent(juce::MidiMessage::noteOff(10, params.snareNote), timeSec + h.duration * 60.0 / bpm);
+        seq.addEvent(juce::MidiMessage::noteOff(10, params.snareNote),
+                     timeSec + h.duration * gateLength * 60.0 / bpm);
     }
     seq.sort();
     seq.updateMatchedPairs();
@@ -132,8 +205,10 @@ void SnareProcessor::exportMidi(const juce::File& file) {
         mf.writeTo(*out);
 }
 
-void SnareProcessor::getStateInformation(juce::MemoryBlock& dest) {
-    auto xml = std::make_unique<juce::XmlElement>("SnareState");
+// ── Preset system ──────────────────────────────────────────────────────────
+void SnareProcessor::savePreset(const juce::File& file) {
+    auto xml = std::make_unique<juce::XmlElement>("SnarePreset");
+    xml->setAttribute("version", "1.2");
     xml->setAttribute("genre", juce::String(params.genre));
     xml->setAttribute("bars", params.bars);
     xml->setAttribute("bpm", params.bpm);
@@ -157,6 +232,81 @@ void SnareProcessor::getStateInformation(juce::MemoryBlock& dest) {
     xml->setAttribute("backbeatLock", params.backbeatLock);
     xml->setAttribute("snareNote", params.snareNote);
     xml->setAttribute("seed", params.seed);
+    xml->setAttribute("gateLength", (double)gateLength);
+    xml->setAttribute("sampleVol", (double)sampleVol);
+    xml->setAttribute("samplePath", samplePath);
+    xml->writeTo(file);
+}
+
+void SnareProcessor::loadPreset(const juce::File& file) {
+    auto xml = juce::XmlDocument::parse(file);
+    if (!xml || !xml->hasTagName("SnarePreset")) return;
+
+    params.genre       = xml->getStringAttribute("genre", "hip-hop").toStdString();
+    params.bars        = xml->getIntAttribute("bars", 4);
+    params.bpm         = xml->getIntAttribute("bpm", 90);
+    params.timeSigNum  = xml->getIntAttribute("timeSigNum", 4);
+    params.resolution  = xml->getIntAttribute("resolution", 4);
+    params.complexity  = (float)xml->getDoubleAttribute("complexity", 0.4);
+    params.density     = (float)xml->getDoubleAttribute("density", 0.4);
+    params.syncopation = (float)xml->getDoubleAttribute("syncopation", 0.3);
+    params.swing       = (float)xml->getDoubleAttribute("swing", 0.0);
+    params.humanize    = (float)xml->getDoubleAttribute("humanize", 0.3);
+    params.accentStr   = (float)xml->getDoubleAttribute("accentStr", 0.6);
+    params.ghostNotes  = (float)xml->getDoubleAttribute("ghostNotes", 0.3);
+    params.fillFreq    = (float)xml->getDoubleAttribute("fillFreq", 0.2);
+    params.variation   = (float)xml->getDoubleAttribute("variation", 0.2);
+    params.motifStr    = (float)xml->getDoubleAttribute("motifStr", 0.7);
+    params.looseness   = (float)xml->getDoubleAttribute("looseness", 0.2);
+    params.probability = (float)xml->getDoubleAttribute("probability", 1.0);
+    params.flam        = (float)xml->getDoubleAttribute("flam", 0.0);
+    params.velMin      = xml->getIntAttribute("velMin", 79);
+    params.velMax      = xml->getIntAttribute("velMax", 127);
+    params.backbeatLock= xml->getBoolAttribute("backbeatLock", true);
+    params.snareNote   = xml->getIntAttribute("snareNote", 38);
+    params.seed        = xml->getIntAttribute("seed", -1);
+    gateLength         = (float)xml->getDoubleAttribute("gateLength", 1.0);
+    sampleVol          = (float)xml->getDoubleAttribute("sampleVol", 0.8);
+
+    auto sp = xml->getStringAttribute("samplePath", "");
+    if (sp.isNotEmpty()) {
+        juce::File f(sp);
+        if (f.existsAsFile()) loadSample(f);
+    }
+
+    regenerate();
+}
+
+// ── DAW state ──────────────────────────────────────────────────────────────
+void SnareProcessor::getStateInformation(juce::MemoryBlock& dest) {
+    auto xml = std::make_unique<juce::XmlElement>("SnareState");
+    xml->setAttribute("version", "1.2");
+    xml->setAttribute("genre", juce::String(params.genre));
+    xml->setAttribute("bars", params.bars);
+    xml->setAttribute("bpm", params.bpm);
+    xml->setAttribute("timeSigNum", params.timeSigNum);
+    xml->setAttribute("resolution", params.resolution);
+    xml->setAttribute("complexity",  (double)params.complexity);
+    xml->setAttribute("density",     (double)params.density);
+    xml->setAttribute("syncopation", (double)params.syncopation);
+    xml->setAttribute("swing",       (double)params.swing);
+    xml->setAttribute("humanize",    (double)params.humanize);
+    xml->setAttribute("accentStr",   (double)params.accentStr);
+    xml->setAttribute("ghostNotes",  (double)params.ghostNotes);
+    xml->setAttribute("fillFreq",    (double)params.fillFreq);
+    xml->setAttribute("variation",   (double)params.variation);
+    xml->setAttribute("motifStr",    (double)params.motifStr);
+    xml->setAttribute("looseness",   (double)params.looseness);
+    xml->setAttribute("probability", (double)params.probability);
+    xml->setAttribute("flam",        (double)params.flam);
+    xml->setAttribute("velMin", params.velMin);
+    xml->setAttribute("velMax", params.velMax);
+    xml->setAttribute("backbeatLock", params.backbeatLock);
+    xml->setAttribute("snareNote", params.snareNote);
+    xml->setAttribute("seed", params.seed);
+    xml->setAttribute("gateLength", (double)gateLength);
+    xml->setAttribute("sampleVol", (double)sampleVol);
+    xml->setAttribute("samplePath", samplePath);
     copyXmlToBinary(*xml, dest);
 }
 
@@ -164,7 +314,6 @@ void SnareProcessor::setStateInformation(const void* data, int size) {
     auto xml = getXmlFromBinary(data, size);
     if (!xml || !xml->hasTagName("SnareState")) return;
 
-    // Use message manager to ensure thread safety
     auto safeRestore = [this, xml = std::shared_ptr<juce::XmlElement>(xml.release())]() {
         params.genre       = xml->getStringAttribute("genre", "hip-hop").toStdString();
         params.bars        = xml->getIntAttribute("bars", 4);
@@ -184,11 +333,21 @@ void SnareProcessor::setStateInformation(const void* data, int size) {
         params.looseness   = (float)xml->getDoubleAttribute("looseness", 0.2);
         params.probability = (float)xml->getDoubleAttribute("probability", 1.0);
         params.flam        = (float)xml->getDoubleAttribute("flam", 0.0);
-        params.velMin      = xml->getIntAttribute("velMin", 30);
+        params.velMin      = xml->getIntAttribute("velMin", 79);
         params.velMax      = xml->getIntAttribute("velMax", 127);
         params.backbeatLock= xml->getBoolAttribute("backbeatLock", true);
         params.snareNote   = xml->getIntAttribute("snareNote", 38);
         params.seed        = xml->getIntAttribute("seed", -1);
+        gateLength         = (float)xml->getDoubleAttribute("gateLength", 1.0);
+        sampleVol          = (float)xml->getDoubleAttribute("sampleVol", 0.8);
+        atomicSampleVol.store(sampleVol);
+
+        auto sp = xml->getStringAttribute("samplePath", "");
+        if (sp.isNotEmpty()) {
+            juce::File f(sp);
+            if (f.existsAsFile()) loadSample(f);
+        }
+
         regenerate();
     };
 

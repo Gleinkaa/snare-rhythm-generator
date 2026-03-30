@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SnareRhythmGenerator VERSION 1.0.0)
+project(SnareRhythmGenerator VERSION 1.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,12 +16,12 @@ FetchContent_MakeAvailable(JUCE)
 
 # Plugin target
 juce_add_plugin(SnareRhythmGenerator
-    COMPANY_NAME           "SnareGen"
+    COMPANY_NAME           "Gleinkaa"
     PLUGIN_MANUFACTURER_CODE Snrg
     PLUGIN_CODE             SRhG
     FORMATS                 VST3 AU Standalone
-    PRODUCT_NAME            "Snare Rhythm Generator"
-    BUNDLE_ID               "com.snaregen.snare-rhythm-generator"
+    PRODUCT_NAME            "SnareRhythmGen"
+    BUNDLE_ID               "com.gleinkaa.snare-rhythm-gen"
     IS_MIDI_EFFECT          FALSE
     NEEDS_MIDI_INPUT        TRUE
     NEEDS_MIDI_OUTPUT       TRUE
@@ -49,6 +49,7 @@ target_link_libraries(SnareRhythmGenerator
     PRIVATE
         juce::juce_audio_utils
         juce::juce_audio_processors
+        juce::juce_audio_formats
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags

@@ -31,15 +31,20 @@ public:
     // Thread-safe interface
     void regenerate();
     void exportMidi(const juce::File& file);
-    void startPlayback() { playPos.store(0.f); playing.store(true); }
+    void startPlayback() { resetRequested.store(true); playing.store(true); }
     void stopPlayback()  { playing.store(false); }
     bool isPlaying() const { return playing.load(); }
     float getPlaybackPos() const { return playPos.load(); }
 
+    // Cursor extrapolation: GUI reads these to compensate for buffer latency
+    std::atomic<double> playPosSampleCount { 0.0 };   // monotonic sample counter when playPos was written
+    std::atomic<double> playPosQuartersPerSample { 0.0 }; // tempo at time of write
+    double getSampleRate() const { return sampleRate; }
+
     // Sample player
     void loadSample(const juce::File& file);
-    juce::String getSampleName() const { return sampleName; }
-    bool hasSample() const { return sampleBuffer.getNumSamples() > 0; }
+    juce::String getSampleName() const { return std::atomic_load(&sampleData)->name; }
+    bool hasSample() const { return std::atomic_load(&sampleData)->buffer.getNumSamples() > 0; }
 
     // Preset save/load
     void savePreset(const juce::File& file);
@@ -61,6 +66,8 @@ private:
     double sampleRate = 44100.0;
     std::atomic<bool> playing { false };
     std::atomic<float> playPos { 0.f };
+    std::atomic<bool> resetRequested { false };
+    double totalSamplesProcessed = 0.0;  // audio thread only
 
     std::shared_ptr<DisplayData> displayData = std::make_shared<DisplayData>();
 
@@ -81,11 +88,14 @@ private:
     };
     std::vector<PendingNoteOff> pendingOffs;
 
-    // Sample player (8-voice polyphonic)
-    juce::AudioBuffer<float> sampleBuffer;
-    double sampleSampleRate = 44100.0;
-    juce::String sampleName;
-    juce::String samplePath;
+    // Sample player (8-voice polyphonic) — thread-safe via shared_ptr
+    struct SampleData {
+        juce::AudioBuffer<float> buffer;
+        double sampleRate = 44100.0;
+        juce::String name;
+        juce::String path;
+    };
+    std::shared_ptr<SampleData> sampleData = std::make_shared<SampleData>();
 
     struct SampleVoice {
         int pos = 0;

@@ -15,9 +15,7 @@ void SnareProcessor::prepareToPlay(double sr, int) {
 
 void SnareProcessor::releaseResources() {
     playing.store(false);
-    playPos.store(0.f);
-    pendingOffs.clear();
-    for (auto& v : sampleVoices) v.active = false;
+    resetRequested.store(true);
 }
 
 void SnareProcessor::regenerate() {
@@ -44,6 +42,10 @@ void SnareProcessor::loadSample(const juce::File& file) {
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     if (!reader) return;
 
+    auto sd = std::make_shared<SampleData>();
+    sd->name = file.getFileNameWithoutExtension();
+    sd->path = file.getFullPathName();
+
     juce::AudioBuffer<float> buf((int)reader->numChannels, (int)reader->lengthInSamples);
     reader->read(&buf, 0, (int)reader->lengthInSamples, 0, true, true);
 
@@ -63,20 +65,27 @@ void SnareProcessor::loadSample(const juce::File& file) {
                 dst[i] = src[idx0] * (1.f - frac) + src[idx1] * frac;
             }
         }
-        sampleBuffer = std::move(resampled);
+        sd->buffer = std::move(resampled);
     } else {
-        sampleBuffer = std::move(buf);
+        sd->buffer = std::move(buf);
     }
 
-    sampleSampleRate = sampleRate;
-    sampleName = file.getFileNameWithoutExtension();
-    samplePath = file.getFullPathName();
-    for (auto& v : sampleVoices) v.active = false;
+    sd->sampleRate = sampleRate;
+    std::atomic_store(&sampleData, sd);
 }
 
 void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) {
     buffer.clear();
     midi.clear();
+
+    int numSamples = buffer.getNumSamples();
+
+    // Handle reset request from startPlayback/releaseResources (H3)
+    if (resetRequested.exchange(false)) {
+        playPos.store(0.f);
+        pendingOffs.clear();
+        for (auto& v : sampleVoices) v.active = false;
+    }
 
     if (!playing.load())
         return;
@@ -89,22 +98,25 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     if (!ad || ad->hits.empty())
         return;
 
-    int bpm = ad->bpm;
+    // Use double BPM from host to avoid timing drift (M3)
+    double bpm = (double)ad->bpm;
     if (auto* ph = getPlayHead()) {
         if (auto pos = ph->getPosition()) {
             if (auto b = pos->getBpm())
-                bpm = (int)*b;
+                bpm = *b;
         }
     }
 
-    double samplesPerQuarter = sampleRate * 60.0 / (double)bpm;
+    double samplesPerQuarter = sampleRate * 60.0 / bpm;
     double quartersPerSample = 1.0 / samplesPerQuarter;
     float ticksPerStep = 1.f / (float)ad->resolution;
     float totalQuarters = (float)(ad->bars * ad->timeSig);
     float svol = atomicSampleVol.load();
 
+    // Thread-safe sample snapshot (H1)
+    auto sd = std::atomic_load(&sampleData);
+
     float pos = playPos.load();
-    int numSamples = buffer.getNumSamples();
     int note = ad->snareNote;
 
     for (int i = 0; i < numSamples; ++i) {
@@ -123,8 +135,8 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 else
                     pendingOffs.push_back({offSample - numSamples, note});
 
-                // Trigger sample voice
-                if (sampleBuffer.getNumSamples() > 0 && svol > 0.001f) {
+                // Trigger sample voice using thread-safe snapshot
+                if (sd && sd->buffer.getNumSamples() > 0 && svol > 0.001f) {
                     float gain = (float)vel / 127.f * svol;
                     int oldest = 0;
                     for (int v = 0; v < 8; ++v) {
@@ -152,10 +164,10 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
 
-    // Render sample voices into audio buffer
-    if (sampleBuffer.getNumSamples() > 0) {
-        int smpLen = sampleBuffer.getNumSamples();
-        int smpCh = sampleBuffer.getNumChannels();
+    // Render sample voices into audio buffer using thread-safe snapshot (H1)
+    if (sd && sd->buffer.getNumSamples() > 0) {
+        int smpLen = sd->buffer.getNumSamples();
+        int smpCh = sd->buffer.getNumChannels();
         int outCh = buffer.getNumChannels();
 
         for (int i = 0; i < numSamples; ++i) {
@@ -165,7 +177,7 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                 if (v.pos >= smpLen) { v.active = false; continue; }
                 float s = 0.f;
                 for (int c = 0; c < smpCh; ++c)
-                    s += sampleBuffer.getSample(c, v.pos);
+                    s += sd->buffer.getSample(c, v.pos);
                 s /= (float)smpCh;
                 mix += s * v.gain;
                 v.pos++;
@@ -175,7 +187,11 @@ void SnareProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         }
     }
 
+    // Publish playback state for GUI cursor extrapolation (C1)
+    totalSamplesProcessed += numSamples;
     playPos.store(pos);
+    playPosSampleCount.store(totalSamplesProcessed);
+    playPosQuartersPerSample.store(quartersPerSample);
 }
 
 void SnareProcessor::exportMidi(const juce::File& file) {
@@ -234,7 +250,7 @@ void SnareProcessor::savePreset(const juce::File& file) {
     xml->setAttribute("seed", params.seed);
     xml->setAttribute("gateLength", (double)gateLength);
     xml->setAttribute("sampleVol", (double)sampleVol);
-    xml->setAttribute("samplePath", samplePath);
+    xml->setAttribute("samplePath", std::atomic_load(&sampleData)->path);
     xml->writeTo(file);
 }
 
@@ -306,7 +322,7 @@ void SnareProcessor::getStateInformation(juce::MemoryBlock& dest) {
     xml->setAttribute("seed", params.seed);
     xml->setAttribute("gateLength", (double)gateLength);
     xml->setAttribute("sampleVol", (double)sampleVol);
-    xml->setAttribute("samplePath", samplePath);
+    xml->setAttribute("samplePath", std::atomic_load(&sampleData)->path);
     copyXmlToBinary(*xml, dest);
 }
 

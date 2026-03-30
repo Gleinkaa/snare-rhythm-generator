@@ -130,6 +130,10 @@ private:
     int hoverGenre = -1;
     bool dragOver = false;
 
+    // Cursor smoothing (C1+C3)
+    float smoothedCursorPos = 0.f;
+    juce::Rectangle<int> gridBounds;  // cached for partial repaint
+
     juce::TooltipWindow tooltipWindow { this };
 
     // Row 1: Rhythm

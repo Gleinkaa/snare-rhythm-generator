@@ -98,7 +98,7 @@ SnareProcessorEditor::SnareProcessorEditor(SnareProcessor& p)
     for (int i = 0; i < (int)names.size(); ++i)
         if (names[i] == proc.params.genre) { selGenre = i; break; }
 
-    startTimerHz(30);
+    startTimerHz(60);
 }
 
 void SnareProcessorEditor::syncFromProcessor() {
@@ -150,7 +150,12 @@ void SnareProcessorEditor::applyGenreDefaults(const snare::GenreProfile& gp) {
 }
 
 void SnareProcessorEditor::timerCallback() {
-    if (proc.isPlaying()) repaint();
+    if (proc.isPlaying()) {
+        if (!gridBounds.isEmpty())
+            repaint(gridBounds);  // partial repaint — only the grid area (C4)
+        else
+            repaint();
+    }
 }
 
 // ── Drag & Drop ────────────────────────────────────────────────────────────
@@ -232,7 +237,8 @@ void SnareProcessorEditor::paint(juce::Graphics& g) {
     int gridH = getHeight() - gridTop - 40;
     int scoreW = 200;
     int gridW = getWidth() - scoreW - 34;
-    paintGrid(g, {14, gridTop + 10, gridW, gridH - 10});
+    gridBounds = {14, gridTop + 10, gridW, gridH - 10};
+    paintGrid(g, gridBounds);
 
     if (dd) {
         paintScores(g, {getWidth() - scoreW - 10, gridTop + 10, scoreW, gridH - 80});
@@ -422,10 +428,33 @@ void SnareProcessorEditor::paintGrid(juce::Graphics& g, juce::Rectangle<int> are
         g.fillRect(x + 1, y, cw - 2, std::min(2.f, ch * 0.12f));
     }
 
-    // Playback cursor
+    // Playback cursor with latency-compensated extrapolation (C1+C3)
     if (proc.isPlaying()) {
         float totalQ = (float)(bars * bpb);
-        float px = ox + (proc.getPlaybackPos() / totalQ) * iw;
+        float rawPos = proc.getPlaybackPos();
+        double snapSampleCount = proc.playPosSampleCount.load();
+        double qps = proc.playPosQuartersPerSample.load();
+
+        // Extrapolate forward by elapsed samples since the audio thread snapshot
+        double now = juce::Time::getMillisecondCounterHiRes();
+        double elapsedSamples = (now - snapSampleCount / proc.getSampleRate() * 1000.0);
+        // Simpler: estimate elapsed from timer interval (~16ms at 60Hz)
+        // Use the sample counter difference approach
+        float extrapolated = rawPos + (float)(qps * proc.getSampleRate() * 0.016);
+
+        // Wrap around
+        if (extrapolated >= totalQ) extrapolated -= totalQ;
+        if (extrapolated < 0.f) extrapolated = 0.f;
+
+        // Smooth to avoid micro-jitter
+        float diff = extrapolated - smoothedCursorPos;
+        if (diff < -totalQ * 0.5f) diff += totalQ;  // handle wrap-around
+        if (diff > totalQ * 0.5f) diff -= totalQ;
+        smoothedCursorPos += diff * 0.45f;
+        if (smoothedCursorPos >= totalQ) smoothedCursorPos -= totalQ;
+        if (smoothedCursorPos < 0.f) smoothedCursorPos += totalQ;
+
+        float px = ox + (smoothedCursorPos / totalQ) * iw;
         g.setColour(Col::green().withAlpha(0.9f));
         g.fillRect(px - 1, oy, 2.f, ih);
         g.setColour(Col::green().withAlpha(0.15f));

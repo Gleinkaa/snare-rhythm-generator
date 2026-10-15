@@ -157,4 +157,4 @@ All three need their paths aligned with `PRODUCT_NAME` (or `PRODUCT_NAME` change
 
 ## License
 
-Not yet declared at the repo root. The macOS installer embeds a permissive MIT-style notice: *Copyright (c) 2026 SnareGen / Gleinkaa — provided "as is", without warranty of any kind.*
+MIT — see [LICENSE](LICENSE).
